@@ -545,8 +545,8 @@ static void build_tab_parameters(lv_obj_t *parent) {
 
         // Name & Category Badge & Description
         lv_obj_t *lbl_name = lv_label_create(s_params[i].card);
-        char title_buf[64];
-        sprintf(title_buf, "#4cc9f0 %s#  [%s]  #9aa3b2 %s#", s_params[i].name, s_params[i].cat, s_params[i].desc);
+        char title_buf[128];
+        snprintf(title_buf, sizeof(title_buf), "#4cc9f0 %s#  [%s]  #9aa3b2 %s#", s_params[i].name, s_params[i].cat, s_params[i].desc);
         lv_label_set_recolor(lbl_name, true);
         lv_label_set_text(lbl_name, title_buf);
         lv_obj_set_style_text_font(lbl_name, &lv_font_montserrat_10, 0);
@@ -554,8 +554,8 @@ static void build_tab_parameters(lv_obj_t *parent) {
 
         // Value text
         s_params[i].val_label = lv_label_create(s_params[i].card);
-        char val_buf[32];
-        sprintf(val_buf, "%.1f %s", s_params[i].value, s_params[i].unit);
+        char val_buf[64];
+        snprintf(val_buf, sizeof(val_buf), "%.1f %s", s_params[i].value, s_params[i].unit);
         lv_label_set_text(s_params[i].val_label, val_buf);
         lv_obj_set_style_text_color(s_params[i].val_label, OI_COLOR_TEXT_MAIN, 0);
         lv_obj_set_style_text_font(s_params[i].val_label, &lv_font_montserrat_14, 0);
@@ -1224,21 +1224,21 @@ void update_openinverter_telemetry(const InverterTelemetry &telem) {
         if (pw_meter < 0) pw_meter = 0;
         lv_meter_set_indicator_value(meter_g_power, indic_g_power_needle, pw_meter);
         if (lbl_g_power_num) {
-            char buf[32];
-            sprintf(buf, "%+.1f kW", telem.power_kw);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%+.1f kW", telem.power_kw);
             lv_label_set_text(lbl_g_power_num, buf);
         }
     }
     if (bar_g_bat && lbl_g_bat) {
         lv_bar_set_value(bar_g_bat, (int)telem.battery_soc, LV_ANIM_OFF);
-        char buf[32];
-        sprintf(buf, "%d%% (%.1f V)", (int)telem.battery_soc, telem.pack_volts);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%d%% (%.1f V)", (int)telem.battery_soc, telem.pack_volts);
         lv_label_set_text(lbl_g_bat, buf);
     }
     if (bar_g_temp && lbl_g_temp) {
         lv_bar_set_value(bar_g_temp, (int)telem.motor_temp, LV_ANIM_OFF);
-        char buf[32];
-        sprintf(buf, "%.1f °C (Heatsink: %.1f °C)", telem.motor_temp, telem.heatsink_temp);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%.1f °C (Heatsink: %.1f °C)", telem.motor_temp, telem.heatsink_temp);
         lv_label_set_text(lbl_g_temp, buf);
     }
 
