@@ -1,0 +1,16 @@
+# PlatformIO build artifacts
+**/.pio/
+**/.vscode/
+
+# Node portable binaries & zip archives
+node-portable/
+*.zip
+
+# Reference / Upstream repositories (tracked separately)
+sperate-repo/
+esp32-web-interface/
+
+# OS & temporary files
+.DS_Store
+Thumbs.db
+*.log

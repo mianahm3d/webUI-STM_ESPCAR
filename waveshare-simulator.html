@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Waveshare ESP32-S3 4.3" — Screen Simulator</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0d0d0d;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #ccc;
+    gap: 18px;
+  }
+
+  /* ── top bar ── */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 13px;
+    color: #888;
+    user-select: none;
+  }
+  .topbar strong { color: #ddd; font-size: 14px; }
+  .badge {
+    background: #1a2a1a;
+    color: #4caf50;
+    border: 1px solid #2d5a2d;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .5px;
+  }
+  .badge.res { background: #1a1a2a; color: #7ea8f8; border-color: #2d3d6a; }
+
+  /* ── device shell ── */
+  .device {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+    /* scale the whole device down to fit a typical 1080p laptop screen */
+    transform: scale(var(--device-scale, 0.9));
+    transform-origin: center top;
+  }
+
+  .bezel {
+    background: linear-gradient(145deg, #2a2a2a 0%, #1a1a1a 40%, #222 100%);
+    border-radius: 14px 14px 8px 8px;
+    padding: 14px 18px 10px 18px;
+    box-shadow:
+      0 0 0 1px #444,
+      0 4px 32px rgba(0,0,0,.7),
+      inset 0 1px 0 rgba(255,255,255,.07);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* camera / IR sensor row above screen */
+  .bezel-top {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 10px;
+  }
+  .dot { width:7px; height:7px; border-radius:50%; background:#111; border:1px solid #333; }
+  .dot.cam { background: #0a1a2a; border-color: #1e3a5a; }
+
+  /* screen area */
+  .screen-wrap {
+    position: relative;
+    width: 800px;
+    height: 480px;
+    border-radius: 4px;
+    overflow: hidden;
+    box-shadow:
+      0 0 0 2px #111,
+      0 0 20px rgba(100,180,255,.08),
+      inset 0 0 40px rgba(0,0,0,.4);
+    background: #000;
+  }
+
+  /* touch-ripple overlay (cosmetic) */
+  .screen-wrap::after {
+    content: '';
+    position: absolute; inset: 0;
+    pointer-events: none;
+    border-radius: 4px;
+    background: linear-gradient(135deg,
+      rgba(255,255,255,.03) 0%,
+      transparent 60%);
+    z-index: 10;
+  }
+
+  iframe {
+    width: 800px;
+    height: 480px;
+    border: none;
+    display: block;
+    border-radius: 4px;
+    /* Force the iframe to render at 800×480 without the browser UI bar */
+    transform-origin: top left;
+  }
+
+  /* bottom bezel strip */
+  .bezel-bottom {
+    width: 820px;
+    height: 28px;
+    background: linear-gradient(180deg, #1e1e1e 0%, #161616 100%);
+    border-radius: 0 0 10px 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 18px;
+    border-top: 1px solid #2a2a2a;
+  }
+  .bezel-bottom .label {
+    font-size: 9px;
+    color: #444;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
+  .bezel-bottom .connectors {
+    display: flex; gap: 6px; align-items: center;
+  }
+  .connector {
+    width: 10px; height: 6px;
+    background: #333; border-radius: 2px;
+    border: 1px solid #444;
+  }
+  .connector.usb { width: 14px; background: #252525; }
+
+  /* ── controls bar ── */
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: center;
+    padding-bottom: 8px;
+  }
+  button {
+    background: #1c1c1c;
+    color: #bbb;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  button:hover { background: #2a2a2a; color: #fff; }
+  button.danger { border-color: #5a2020; color: #e07070; }
+  button.danger:hover { background: #3a1010; }
+
+  select {
+    background: #1c1c1c;
+    color: #bbb;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .sep { color: #333; }
+
+  /* ── status strip ── */
+  .status {
+    font-size: 11px;
+    color: #555;
+    height: 16px;
+  }
+  .status span { color: #4caf50; }
+</style>
+</head>
+<body>
+
+<!-- Top label -->
+<div class="topbar">
+  <strong>Waveshare ESP32-S3 4.3″ Touch Display</strong>
+  <span class="badge res">800 × 480 px</span>
+  <span class="badge">IPS · 65K · 5-pt Cap. Touch</span>
+  <span class="sep">|</span>
+  <span>Simulating on laptop @ <span id="scaleLabel">90%</span></span>
+</div>
+
+<!-- Device shell -->
+<div class="device" id="device">
+  <div class="bezel">
+    <div class="bezel-top">
+      <div class="dot cam"></div>
+      <div class="dot"></div>
+    </div>
+
+    <div class="screen-wrap" id="screenWrap">
+      <iframe
+        id="screen"
+        src="http://127.0.0.1:8765/"
+        title="OI Web Interface"
+        scrolling="no"
+      ></iframe>
+    </div>
+  </div>
+
+  <div class="bezel-bottom">
+    <span class="label">Waveshare · ESP32-S3</span>
+    <div class="connectors">
+      <div class="connector usb" title="USB-C"></div>
+      <div class="connector" title="IO"></div>
+      <div class="connector" title="IO"></div>
+    </div>
+    <span class="label">4.3 INCH · TOUCH</span>
+  </div>
+</div>
+
+<!-- Controls -->
+<div class="controls">
+  <label style="font-size:12px;color:#666;">Zoom:</label>
+  <select id="scaleSelect" onchange="setScale(this.value)">
+    <option value="1.0">100% (native 800×480)</option>
+    <option value="0.9" selected>90% (recommended)</option>
+    <option value="0.8">80%</option>
+    <option value="0.7">70%</option>
+    <option value="0.6">60%</option>
+    <option value="0.5">50%</option>
+  </select>
+  <span class="sep">|</span>
+  <button onclick="document.getElementById('screen').src = document.getElementById('screen').src">↺ Reload UI</button>
+  <button onclick="openFullscreen()">⛶ Fullscreen frame</button>
+  <button onclick="openNativeWindow()">↗ Open in native 800×480 window</button>
+  <span class="sep">|</span>
+  <button onclick="injectSpot('udc','420')">💡 UDC → 420V</button>
+  <button onclick="injectSpot('speed','2500')">💡 Speed → 2500rpm</button>
+  <button onclick="injectSpot('tmphs','67')">💡 Temp → 67°C</button>
+  <button onclick="injectSpot('opmode','1')">▶ opmode = Run</button>
+  <button onclick="resetState()" class="danger">⏹ Reset sim</button>
+</div>
+
+<div class="status" id="status">● <span>Mock ESP running at http://127.0.0.1:8765</span> — backend is live</div>
+
+<script>
+  // ── scale helper ──
+  function setScale(v) {
+    const s = parseFloat(v);
+    document.getElementById('device').style.setProperty('--device-scale', s);
+    document.getElementById('device').style.transform = `scale(${s})`;
+    document.getElementById('scaleLabel').textContent = Math.round(s*100) + '%';
+    // shrink the body height based on scale so the page doesn't clip
+    document.body.style.minHeight = (600 * s + 160) + 'px';
+  }
+  setScale(0.9); // init
+
+  // ── fullscreen the iframe content ──
+  function openFullscreen() {
+    const el = document.getElementById('screenWrap');
+    if (el.requestFullscreen) el.requestFullscreen();
+  }
+
+  // ── pop out exact 800×480 window (simulates physical screen) ──
+  function openNativeWindow() {
+    const w = window.open(
+      'http://127.0.0.1:8765/',
+      'WaveshareScreen',
+      'width=800,height=480,menubar=no,toolbar=no,location=no,status=no,resizable=no,scrollbars=no'
+    );
+    if (!w) alert('Pop-up blocked — please allow pop-ups for this page.');
+  }
+
+  // ── test introspection helpers ──
+  async function injectSpot(name, value) {
+    const r = await fetch(`http://127.0.0.1:8765/__test/spot?name=${name}&value=${value}`);
+    const t = await r.text();
+    setStatus(`Injected ${name}=${value} → ${t}`);
+  }
+
+  async function resetState() {
+    await fetch('http://127.0.0.1:8765/__test/reset', { method: 'POST' });
+    document.getElementById('screen').src = 'http://127.0.0.1:8765/';
+    setStatus('Simulator state reset to defaults');
+  }
+
+  function setStatus(msg) {
+    document.getElementById('status').innerHTML =
+      `● <span>${msg}</span>`;
+    setTimeout(() => {
+      document.getElementById('status').innerHTML =
+        `● <span>Mock ESP running at http://127.0.0.1:8765</span> — backend is live`;
+    }, 4000);
+  }
+
+  // ── check server reachability ──
+  async function checkServer() {
+    try {
+      await fetch('http://127.0.0.1:8765/version');
+    } catch {
+      document.getElementById('status').innerHTML =
+        `<span style="color:#e07070">⚠ Mock server not reachable — restart it and reload this page</span>`;
+    }
+  }
+  checkServer();
+</script>
+</body>
+</html>
