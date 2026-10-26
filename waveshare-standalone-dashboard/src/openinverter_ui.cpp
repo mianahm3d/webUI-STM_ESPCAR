@@ -1,4 +1,5 @@
 #include "openinverter_ui.h"
+#include "can_vcu.h"
 
 // Tab views and navigation buttons
 static lv_obj_t *oi_container = NULL;
@@ -208,8 +209,18 @@ static void log_toggle_cb(lv_event_t *e) {
 }
 
 static void can_send_click_cb(lv_event_t *e) {
-    if (!ta_can_log) return;
-    lv_textarea_add_text(ta_can_log, "\n[TX] ID: 0x180 DLC: 8 DATA: 00 00 00 00 00 00 00 00");
+    uint32_t id = 0x180;
+    uint8_t data[8] = {0};
+    if (ta_can_tx_id) {
+        const char *txt_id = lv_textarea_get_text(ta_can_tx_id);
+        if (txt_id) id = strtoul(txt_id, NULL, 0);
+    }
+    bool sent = send_can_frame(id, data, 8);
+    if (ta_can_log) {
+        char log_buf[96];
+        snprintf(log_buf, sizeof(log_buf), "\n[%s] ID: 0x%X DLC: 8 DATA: 00 00 00 00 00 00 00 00", sent ? "TX OK" : "TX FAIL", (unsigned int)id);
+        lv_textarea_add_text(ta_can_log, log_buf);
+    }
 }
 
 static void screen_sleep_click_cb(lv_event_t *e) {
@@ -1131,28 +1142,60 @@ lv_obj_t* create_openinverter_full_ui(lv_obj_t *parent, OiBackClusterCb back_cb,
 void update_openinverter_telemetry(const InverterTelemetry &telem) {
     if (!oi_container) return;
 
-    // Update Dashboard Metrics
+    bool vcu_online = is_vcu_connected();
+
+    // Top Hero Status Updates
+    if (lbl_dash_opmode_pill) {
+        if (vcu_online) {
+            lv_label_set_text(lbl_dash_opmode_pill, "#54e6a4 [● RUN]#  #e8ecf1 VCU CONNECTED (CAN 500k LIVE)#");
+        } else {
+            lv_label_set_text(lbl_dash_opmode_pill, "#ff6b6b [● OFFLINE]#  #9aa3b2 VCU DISCONNECTED (Awaiting CAN bus)#");
+        }
+    }
+    if (lbl_dash_status) {
+        if (vcu_online) {
+            lv_label_set_text(lbl_dash_status, "#9aa3b2 Status: 0 (OK)  |  #54e6a4 CAN #1 Active#  |  #54e6a4 500 kbps#");
+        } else {
+            lv_label_set_text(lbl_dash_status, "#ff6b6b No CAN frames received - connect to ZombieVerter 500k bus#");
+        }
+    }
+    if (lbl_dash_can_status) {
+        char c_buf[140];
+        snprintf(c_buf, sizeof(c_buf),
+            "#38bdf8 Bus Status:# %s\n#34d399 RX Packets:# %lu\n#ffb454 TX Packets:# %lu\n#9aa3b2 Bitrate:# 500 kbps\n#9aa3b2 STM32 Node:# 1",
+            vcu_online ? "#54e6a4 Active#" : "#ff6b6b Offline#",
+            (unsigned long)can_rx_packet_count,
+            (unsigned long)can_tx_packet_count
+        );
+        lv_label_set_text(lbl_dash_can_status, c_buf);
+    }
+
+    // Update Dashboard Metrics Cards
     if (lbl_dash_udc) {
         char buf[32];
-        sprintf(buf, "%.1f V", telem.pack_volts);
+        if (vcu_online && telem.pack_volts > 0.0f) sprintf(buf, "%.1f V", telem.pack_volts);
+        else sprintf(buf, "---");
         lv_label_set_text(lbl_dash_udc, buf);
         lv_bar_set_value(bar_dash_udc, (int)((telem.pack_volts - 250.0f) * 100.0f / 200.0f), LV_ANIM_OFF);
     }
     if (lbl_dash_idc) {
         char buf[32];
-        sprintf(buf, "%.1f A", telem.pack_current);
+        if (vcu_online) sprintf(buf, "%.1f A", telem.pack_current);
+        else sprintf(buf, "---");
         lv_label_set_text(lbl_dash_idc, buf);
         lv_bar_set_value(bar_dash_idc, (int)(telem.pack_current * 100.0f / 150.0f), LV_ANIM_OFF);
     }
     if (lbl_dash_speed) {
         char buf[32];
-        sprintf(buf, "%d RPM", (int)telem.motor_rpm);
+        if (vcu_online) sprintf(buf, "%d RPM", (int)telem.motor_rpm);
+        else sprintf(buf, "0 RPM");
         lv_label_set_text(lbl_dash_speed, buf);
         lv_bar_set_value(bar_dash_speed, (int)(telem.motor_rpm * 100.0f / 7000.0f), LV_ANIM_OFF);
     }
     if (lbl_dash_power) {
         char buf[32];
-        sprintf(buf, "%+.1f kW", telem.power_kw);
+        if (vcu_online) sprintf(buf, "%+.1f kW", telem.power_kw);
+        else sprintf(buf, "0.0 kW");
         lv_label_set_text(lbl_dash_power, buf);
         int p_pct = (int)((telem.power_kw + 20.0f) * 100.0f / 80.0f);
         if (p_pct < 0) p_pct = 0; if (p_pct > 100) p_pct = 100;
@@ -1162,47 +1205,66 @@ void update_openinverter_telemetry(const InverterTelemetry &telem) {
     // Update Spot Values Table
     if (tbl_spot) {
         char buf[32];
-        sprintf(buf, "%d", (int)telem.motor_rpm);
-        lv_table_set_cell_value(tbl_spot, 0, 1, buf);
-        sprintf(buf, "%.1f", telem.pack_volts);
-        lv_table_set_cell_value(tbl_spot, 0, 3, buf);
+        if (vcu_online) {
+            sprintf(buf, "%d", (int)telem.motor_rpm);
+            lv_table_set_cell_value(tbl_spot, 0, 1, buf);
+            sprintf(buf, "%.1f", telem.pack_volts);
+            lv_table_set_cell_value(tbl_spot, 0, 3, buf);
 
-        sprintf(buf, "%.1f", telem.pack_current);
-        lv_table_set_cell_value(tbl_spot, 1, 1, buf);
-        sprintf(buf, "%+.1f", telem.power_kw);
-        lv_table_set_cell_value(tbl_spot, 1, 3, buf);
+            sprintf(buf, "%.1f", telem.pack_current);
+            lv_table_set_cell_value(tbl_spot, 1, 1, buf);
+            sprintf(buf, "%+.1f", telem.power_kw);
+            lv_table_set_cell_value(tbl_spot, 1, 3, buf);
 
-        sprintf(buf, "%.1f", telem.motor_temp);
-        lv_table_set_cell_value(tbl_spot, 2, 1, buf);
-        sprintf(buf, "%.1f", telem.heatsink_temp);
-        lv_table_set_cell_value(tbl_spot, 2, 3, buf);
+            sprintf(buf, "%.1f", telem.motor_temp);
+            lv_table_set_cell_value(tbl_spot, 2, 1, buf);
+            sprintf(buf, "%.1f", telem.heatsink_temp);
+            lv_table_set_cell_value(tbl_spot, 2, 3, buf);
 
-        sprintf(buf, "%.1f", telem.pack_current * 0.92f);
-        lv_table_set_cell_value(tbl_spot, 3, 1, buf);
-        sprintf(buf, "%.1f", telem.pack_current * 0.94f);
-        lv_table_set_cell_value(tbl_spot, 3, 3, buf);
+            sprintf(buf, "%.1f", telem.pack_current * 0.92f);
+            lv_table_set_cell_value(tbl_spot, 3, 1, buf);
+            sprintf(buf, "%.1f", telem.pack_current * 0.94f);
+            lv_table_set_cell_value(tbl_spot, 3, 3, buf);
 
-        sprintf(buf, "%.1f", telem.motor_rpm * 0.033f);
-        lv_table_set_cell_value(tbl_spot, 4, 1, buf);
-        sprintf(buf, "%.1f", telem.pack_volts * 0.65f);
-        lv_table_set_cell_value(tbl_spot, 4, 3, buf);
+            sprintf(buf, "%.1f", telem.motor_rpm * 0.033f);
+            lv_table_set_cell_value(tbl_spot, 4, 1, buf);
+            sprintf(buf, "%.1f", telem.pack_volts * 0.65f);
+            lv_table_set_cell_value(tbl_spot, 4, 3, buf);
 
-        sprintf(buf, "%d", (int)(telem.speed_kmh * 28.0f + 350.0f));
-        lv_table_set_cell_value(tbl_spot, 5, 1, buf);
-        sprintf(buf, "%d", (int)(telem.speed_kmh * 27.5f + 348.0f));
-        lv_table_set_cell_value(tbl_spot, 5, 3, buf);
+            sprintf(buf, "%d", (int)(telem.speed_kmh * 28.0f + 350.0f));
+            lv_table_set_cell_value(tbl_spot, 5, 1, buf);
+            sprintf(buf, "%d", (int)(telem.speed_kmh * 27.5f + 348.0f));
+            lv_table_set_cell_value(tbl_spot, 5, 3, buf);
 
-        lv_table_set_cell_value(tbl_spot, 6, 1, telem.din_fwd ? "1 [ACTIVE]" : "0 [OFF]");
-        lv_table_set_cell_value(tbl_spot, 6, 3, telem.din_rev ? "1 [ACTIVE]" : "0 [OFF]");
+            lv_table_set_cell_value(tbl_spot, 6, 1, telem.din_fwd ? "1 [ACTIVE]" : "0 [OFF]");
+            lv_table_set_cell_value(tbl_spot, 6, 3, telem.din_rev ? "1 [ACTIVE]" : "0 [OFF]");
 
-        lv_table_set_cell_value(tbl_spot, 7, 1, telem.din_brake ? "1 [ACTIVE]" : "0 [OFF]");
-        lv_table_set_cell_value(tbl_spot, 7, 3, telem.lasterr_str ? telem.lasterr_str : "NONE (0)");
+            lv_table_set_cell_value(tbl_spot, 7, 1, telem.din_brake ? "1 [ACTIVE]" : "0 [OFF]");
+            lv_table_set_cell_value(tbl_spot, 7, 3, telem.lasterr_str ? telem.lasterr_str : "NONE (0)");
+        } else {
+            lv_table_set_cell_value(tbl_spot, 0, 1, "---");
+            lv_table_set_cell_value(tbl_spot, 0, 3, "---");
+            lv_table_set_cell_value(tbl_spot, 1, 1, "---");
+            lv_table_set_cell_value(tbl_spot, 1, 3, "---");
+            lv_table_set_cell_value(tbl_spot, 2, 1, "---");
+            lv_table_set_cell_value(tbl_spot, 2, 3, "---");
+            lv_table_set_cell_value(tbl_spot, 3, 1, "---");
+            lv_table_set_cell_value(tbl_spot, 3, 3, "---");
+            lv_table_set_cell_value(tbl_spot, 4, 1, "---");
+            lv_table_set_cell_value(tbl_spot, 4, 3, "---");
+            lv_table_set_cell_value(tbl_spot, 5, 1, "---");
+            lv_table_set_cell_value(tbl_spot, 5, 3, "---");
+            lv_table_set_cell_value(tbl_spot, 6, 1, "0 [OFF]");
+            lv_table_set_cell_value(tbl_spot, 6, 3, "0 [OFF]");
+            lv_table_set_cell_value(tbl_spot, 7, 1, "0 [OFF]");
+            lv_table_set_cell_value(tbl_spot, 7, 3, "NO CAN");
+        }
     }
 
-    // Update Oscilloscope Chart
+    // Update Oscilloscope Chart (only active when VCU is transmitting)
     if (chart_plot && plot_running && plot_ser_speed && plot_ser_power) {
-        int sp_val = (int)(telem.motor_rpm * 100.0f / 7000.0f);
-        int pw_val = (int)((telem.power_kw + 20.0f) * 100.0f / 80.0f);
+        int sp_val = vcu_online ? (int)(telem.motor_rpm * 100.0f / 7000.0f) : 0;
+        int pw_val = vcu_online ? (int)((telem.power_kw + 20.0f) * 100.0f / 80.0f) : 0;
         if (sp_val < 0) sp_val = 0; if (sp_val > 100) sp_val = 100;
         if (pw_val < 0) pw_val = 0; if (pw_val > 100) pw_val = 100;
         lv_chart_set_next_value(chart_plot, plot_ser_speed, sp_val);
@@ -1232,13 +1294,21 @@ void update_openinverter_telemetry(const InverterTelemetry &telem) {
     if (bar_g_bat && lbl_g_bat) {
         lv_bar_set_value(bar_g_bat, (int)telem.battery_soc, LV_ANIM_OFF);
         char buf[64];
-        snprintf(buf, sizeof(buf), "%d%% (%.1f V)", (int)telem.battery_soc, telem.pack_volts);
+        if (vcu_online && telem.pack_volts > 0.0f) {
+            snprintf(buf, sizeof(buf), "%d%% (%.1f V)", (int)telem.battery_soc, telem.pack_volts);
+        } else {
+            snprintf(buf, sizeof(buf), "---");
+        }
         lv_label_set_text(lbl_g_bat, buf);
     }
     if (bar_g_temp && lbl_g_temp) {
         lv_bar_set_value(bar_g_temp, (int)telem.motor_temp, LV_ANIM_OFF);
         char buf[64];
-        snprintf(buf, sizeof(buf), "%.1f °C (Heatsink: %.1f °C)", telem.motor_temp, telem.heatsink_temp);
+        if (vcu_online && telem.motor_temp > 0.0f) {
+            snprintf(buf, sizeof(buf), "%.1f °C (Heatsink: %.1f °C)", telem.motor_temp, telem.heatsink_temp);
+        } else {
+            snprintf(buf, sizeof(buf), "---");
+        }
         lv_label_set_text(lbl_g_temp, buf);
     }
 

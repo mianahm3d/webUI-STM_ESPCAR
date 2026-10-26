@@ -7,6 +7,7 @@
 #include "esp_lcd_panel_rgb.h"
 #include <lvgl.h>
 #include "openinverter_ui.h"
+#include "can_vcu.h"
 
 #define LCD_H_RES              800
 #define LCD_V_RES              480
@@ -92,18 +93,18 @@ static bool backlight_state = true;
 static lv_disp_draw_buf_t draw_buf;
 static lv_color_t *buf_1 = NULL;
 
-// Telemetry state
-static float current_speed_kmh = 58.0f;
-static float battery_soc = 84.0f;
-static float motor_temp = 40.0f;
-static float pack_volts = 116.3f;
-static float pack_current = 9.5f;
-static float power_kw = 1.1f;
-static float avg_efficiency = 16.0f;
+// Telemetry state (Pure CAN - strictly 0 until ZombieVerter VCU transmits)
+static float current_speed_kmh = 0.0f;
+static float battery_soc = 0.0f;
+static float motor_temp = 0.0f;
+static float pack_volts = 0.0f;
+static float pack_current = 0.0f;
+static float power_kw = 0.0f;
+static float avg_efficiency = 0.0f;
 static float aux_12v = 13.8f;
 static double odometer_km = 81779.3;
-static int active_gear = 3; // 0=P, 1=R, 2=N, 3=D
-static float sim_time = 0.0f;
+static int active_gear = 2; // 0=P, 1=R, 2=N, 3=D (Neutral default)
+static float motor_rpm = 0.0f;
 
 // Mode State: true = Mehran EV Cluster, false = OpenInverter WebUI
 static bool show_mehran_cluster = true;
@@ -134,7 +135,6 @@ static lv_meter_indicator_t *indic_rpm_needle = NULL;
 static lv_meter_indicator_t *indic_rpm_arc = NULL;
 static lv_obj_t *lbl_speed_digital = NULL;
 static lv_obj_t *lbl_rpm_val = NULL;
-static float motor_rpm = 2900.0f;
 static lv_obj_t *lbl_odo_digits[6];
 static lv_obj_t *meter_battery = NULL;
 static lv_meter_indicator_t *indic_bat_needle = NULL;
@@ -175,7 +175,8 @@ void setBacklight(bool on) {
     Wire.endTransmission();
 
     Wire.beginTransmission(CH422G_REG_OUT);
-    uint8_t out = on ? 0x1F : 0x1B;
+    // Bit 5 (0x20) is USB_SEL: HIGH routes GPIO 19 & 20 to onboard CAN Transceiver (TJA1051)
+    uint8_t out = on ? 0x3F : 0x3B;
     Wire.write(out);
     Wire.endTransmission();
 }
@@ -190,12 +191,12 @@ void resetTouchHardware() {
     Wire.endTransmission();
 
     Wire.beginTransmission(CH422G_REG_OUT);
-    Wire.write(0x1D); // TP_RST LOW
+    Wire.write(0x3D); // TP_RST LOW + USB_SEL HIGH (CAN Enabled)
     Wire.endTransmission();
     delay(100);
 
     Wire.beginTransmission(CH422G_REG_OUT);
-    Wire.write(0x1F); // TP_RST HIGH
+    Wire.write(0x3F); // TP_RST HIGH + USB_SEL HIGH (CAN Enabled)
     Wire.endTransmission();
     delay(150);
 
@@ -995,6 +996,7 @@ void setup() {
     setBacklight(true);
     scanI2C();
     initLcd();
+    init_vcu_can();
 
     lv_init();
 
@@ -1092,12 +1094,12 @@ void loop() {
             t = 1.0f;
             boot_state = BOOT_RUNNING;
         }
-        // Settle from max down to live vehicle levels
-        int sp_val = (int)(140.0f - (140.0f - current_speed_kmh) * t);
-        int rpm_sweep = (int)(7000.0f - (7000.0f - motor_rpm) * t);
+        // Settle from max sweep down to 0 (strictly awaiting CAN bus data from VCU)
+        int sp_val = (int)(140.0f * (1.0f - t));
+        int rpm_sweep = (int)(7000.0f * (1.0f - t));
         lv_meter_set_indicator_value(meter_speed, indic_speed_needle, sp_val);
-        lv_meter_set_indicator_value(meter_battery, indic_bat_needle, (int)(100.0f - (100.0f - battery_soc) * t));
-        lv_meter_set_indicator_value(meter_temp, indic_temp_needle, (int)(120.0f - (120.0f - motor_temp) * t));
+        lv_meter_set_indicator_value(meter_battery, indic_bat_needle, (int)(100.0f * (1.0f - t)));
+        lv_meter_set_indicator_value(meter_temp, indic_temp_needle, (int)(120.0f * (1.0f - t)));
         if (lbl_speed_digital) {
             char sbuf[16];
             sprintf(sbuf, "%d", sp_val);
@@ -1112,51 +1114,66 @@ void loop() {
         return;
     }
 
-    // ================= NORMAL DRIVING TELEMETRY (15 FPS) =================
-    if (now - last_telemetry_tick >= 65) {
-        last_telemetry_tick = now;
-        sim_time += 0.05f;
+    // ================= PURE CAN TELEMETRY (NO SIMULATION) =================
+    // Drain and process all incoming CAN bus messages from ZombieVerter VCU
+    static InverterTelemetry telem;
+    poll_vcu_can(telem);
+    bool vcu_online = is_vcu_connected();
 
-        if (active_gear == 3) { // D (Drive)
-            current_speed_kmh = 42.0f + 36.0f * sin(sim_time);
-            if (current_speed_kmh < 0) current_speed_kmh = 0;
-            power_kw = 1.1f + (current_speed_kmh * 0.22f) + 4.0f * sin(sim_time * 2.0f);
-            pack_current = abs(power_kw * 1000.0f / pack_volts);
-            odometer_km += (current_speed_kmh / 3600.0) * 0.065;
-            motor_rpm = current_speed_kmh * 48.0f + 150.0f;
-        } else if (active_gear == 1) { // R (Reverse)
-            current_speed_kmh = 12.0f + 6.0f * sin(sim_time);
-            power_kw = 2.5f;
-            pack_current = 21.0f;
-            odometer_km += (current_speed_kmh / 3600.0) * 0.065;
-            motor_rpm = current_speed_kmh * 48.0f + 100.0f;
-        } else { // P or N
+    if (now - last_telemetry_tick >= 50) {
+        last_telemetry_tick = now;
+
+        if (vcu_online) {
+            current_speed_kmh = telem.speed_kmh;
+            motor_rpm = telem.motor_rpm;
+            pack_volts = telem.pack_volts;
+            pack_current = telem.pack_current;
+            power_kw = telem.power_kw;
+            battery_soc = telem.battery_soc;
+            motor_temp = telem.motor_temp;
+            active_gear = telem.active_gear;
+
+            // Odometer advances strictly with real physical speed
+            if (current_speed_kmh > 0.5f) {
+                odometer_km += (current_speed_kmh / 3600.0) * 0.050;
+            }
+        } else {
+            // VCU Disconnected / No CAN bus data received: All needles and gauges at zero
             current_speed_kmh = 0.0f;
-            power_kw = 0.2f;
-            pack_current = 1.7f;
             motor_rpm = 0.0f;
+            power_kw = 0.0f;
+            pack_current = 0.0f;
+            pack_volts = 0.0f;
+            battery_soc = 0.0f;
+            motor_temp = 0.0f;
+            active_gear = 2; // Neutral
         }
 
-        if (motor_rpm > 7000.0f) motor_rpm = 7000.0f;
-        battery_soc = 84.0f - (float)((int)(sim_time * 0.1f) % 15);
-        pack_volts = 112.0f + (battery_soc * 0.06f);
-        motor_temp = 40.0f + 3.0f * sin(sim_time * 0.15f);
-
         if (show_mehran_cluster) {
+            // Speedometer needle
             lv_meter_set_indicator_value(meter_speed, indic_speed_needle, (int)current_speed_kmh);
 
             if (lbl_speed_digital) {
                 char sbuf[16];
-                sprintf(sbuf, "%d", (int)current_speed_kmh);
+                if (vcu_online) {
+                    sprintf(sbuf, "%d", (int)current_speed_kmh);
+                } else {
+                    sprintf(sbuf, "0");
+                }
                 lv_label_set_text(lbl_speed_digital, sbuf);
             }
 
             if (lbl_rpm_val) {
                 char rbuf[16];
-                sprintf(rbuf, "%d RPM", (int)motor_rpm);
+                if (vcu_online) {
+                    sprintf(rbuf, "%d RPM", (int)motor_rpm);
+                } else {
+                    sprintf(rbuf, "NO CAN");
+                }
                 lv_label_set_text(lbl_rpm_val, rbuf);
             }
 
+            // Odometer
             long odo_int = (long)(odometer_km * 10.0);
             char odo_str[16];
             sprintf(odo_str, "%06ld", odo_int % 1000000L);
@@ -1165,26 +1182,39 @@ void loop() {
                 lv_label_set_text(lbl_odo_digits[d], ch);
             }
 
+            // Battery SOC needle & readout
             lv_meter_set_indicator_value(meter_battery, indic_bat_needle, (int)battery_soc);
             char b_buf[16];
-            sprintf(b_buf, "%d%%", (int)battery_soc);
+            if (vcu_online && battery_soc > 0.0f) {
+                sprintf(b_buf, "%d%%", (int)battery_soc);
+            } else {
+                sprintf(b_buf, "---");
+            }
             lv_label_set_text(lbl_bat_pct, b_buf);
 
+            // Motor temperature needle & readout
             lv_meter_set_indicator_value(meter_temp, indic_temp_needle, (int)motor_temp);
             char t_buf[16];
-            sprintf(t_buf, "%d°C", (int)motor_temp);
+            if (vcu_online && motor_temp > 0.0f) {
+                sprintf(t_buf, "%d°C", (int)motor_temp);
+            } else {
+                sprintf(t_buf, "---");
+            }
             lv_label_set_text(lbl_temp_val, t_buf);
 
-            char v_buf[16];
-            sprintf(v_buf, "%.1f", pack_volts);
+            // Digital telemetry cards
+            char v_buf[16], i_buf[16], p_buf[16];
+            if (vcu_online) {
+                sprintf(v_buf, "%.1f", pack_volts);
+                sprintf(i_buf, "%.1f", pack_current);
+                sprintf(p_buf, "%+.1f", power_kw);
+            } else {
+                sprintf(v_buf, "---");
+                sprintf(i_buf, "---");
+                sprintf(p_buf, "---");
+            }
             lv_label_set_text(lbl_card_volts, v_buf);
-
-            char i_buf[16];
-            sprintf(i_buf, "%.1f", pack_current);
             lv_label_set_text(lbl_card_current, i_buf);
-
-            char p_buf[16];
-            sprintf(p_buf, "%+.1f", power_kw);
             lv_label_set_text(lbl_card_power, p_buf);
 
             char e_buf[16];
@@ -1197,29 +1227,53 @@ void loop() {
 
             if (lbl_card_range) {
                 char r_buf[16];
-                sprintf(r_buf, "%d", (int)(battery_soc * 1.55f));
+                if (vcu_online && battery_soc > 0.0f) {
+                    sprintf(r_buf, "%d", (int)(battery_soc * 1.55f));
+                } else {
+                    sprintf(r_buf, "---");
+                }
                 lv_label_set_text(lbl_card_range, r_buf);
+            }
+
+            // Gear indicator buttons
+            for (int g = 0; g < 4; g++) {
+                if (gear_btns[g]) {
+                    if (g == active_gear && vcu_online) {
+                        lv_obj_set_style_bg_color(gear_btns[g], COLOR_GEAR_ACTIVE_BG, 0);
+                        lv_obj_set_style_border_color(gear_btns[g], COLOR_GEAR_ACTIVE_BD, 0);
+                        lv_obj_t *glbl = lv_obj_get_child(gear_btns[g], 0);
+                        if (glbl) lv_obj_set_style_text_color(glbl, COLOR_GEAR_ACTIVE_FG, 0);
+                    } else {
+                        lv_obj_set_style_bg_color(gear_btns[g], COLOR_DIAL_BG, 0);
+                        lv_obj_set_style_border_color(gear_btns[g], COLOR_DIAL_BORDER, 0);
+                        lv_obj_t *glbl = lv_obj_get_child(gear_btns[g], 0);
+                        if (glbl) lv_obj_set_style_text_color(glbl, COLOR_GEAR_INACTIVE, 0);
+                    }
+                }
+            }
+
+            // READY pill: Green if connected to VCU, Red/Muted if disconnected
+            if (btn_ready) {
+                lv_obj_t *rlbl = lv_obj_get_child(btn_ready, 0);
+                if (vcu_online) {
+                    lv_obj_set_style_bg_color(btn_ready, COLOR_READY_BG, 0);
+                    lv_obj_set_style_border_color(btn_ready, COLOR_READY_FG, 0);
+                    if (rlbl) {
+                        lv_label_set_text(rlbl, "READY");
+                        lv_obj_set_style_text_color(rlbl, COLOR_READY_FG, 0);
+                    }
+                } else {
+                    lv_obj_set_style_bg_color(btn_ready, lv_color_hex(0x27140e), 0);
+                    lv_obj_set_style_border_color(btn_ready, lv_color_hex(0x7f1d1d), 0);
+                    if (rlbl) {
+                        lv_label_set_text(rlbl, "NO CAN");
+                        lv_obj_set_style_text_color(rlbl, lv_color_hex(0xf87171), 0);
+                    }
+                }
             }
         }
 
         // Keep OpenInverter Web Interface synchronized in real-time
-        InverterTelemetry telem;
-        telem.speed_kmh = current_speed_kmh;
-        telem.motor_rpm = motor_rpm;
-        telem.pack_volts = pack_volts;
-        telem.pack_current = pack_current;
-        telem.power_kw = power_kw;
-        telem.battery_soc = battery_soc;
-        telem.motor_temp = motor_temp;
-        telem.heatsink_temp = motor_temp - 6.5f;
-        telem.aux_12v = aux_12v;
-        telem.opmode = (active_gear == 3) ? 1 : 0;
-        telem.status_str = "RUNNING";
-        telem.lasterr_str = "NONE (0)";
-        telem.din_fwd = (active_gear == 3);
-        telem.din_rev = (active_gear == 1);
-        telem.din_brake = (active_gear == 0);
-        telem.active_gear = active_gear;
         update_openinverter_telemetry(telem);
     }
 
