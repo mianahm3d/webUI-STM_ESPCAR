@@ -4,9 +4,9 @@
 #include <Arduino.h>
 #include <lvgl.h>
 
-#define NUM_OI_TABS 8
+#define NUM_OI_TABS 11
 
-// OpenInverter Dark Theme Color Palette
+// OpenInverter Dark Theme Color Palette (wjcloudy/esp32-web-interface v4.1 glassmorphism)
 #define OI_COLOR_BG             lv_color_hex(0x07090e)
 #define OI_COLOR_SURFACE        lv_color_hex(0x10151d)
 #define OI_COLOR_SURFACE_HOVER  lv_color_hex(0x151b25)
@@ -20,10 +20,9 @@
 #define OI_COLOR_AMBER          lv_color_hex(0xffb454)
 #define OI_COLOR_RED            lv_color_hex(0xff6b6b)
 
-// Callback type for returning to Mehran EV Cluster
-typedef void (*OiBackClusterCb)(void);
-// Callback type for screen sleep
+// Callback type for screen sleep / backlight toggle
 typedef void (*OiSleepCb)(void);
+typedef void (*OiBrightnessCb)(uint8_t val);
 
 // Inverter live telemetry struct passed to the UI
 struct InverterTelemetry {
@@ -43,10 +42,11 @@ struct InverterTelemetry {
     int   din_rev;
     int   din_brake;
     int   active_gear;    // 0=P, 1=R, 2=N, 3=D
+    bool  can_connected;
 };
 
 // UI Initialization and update functions
-lv_obj_t* create_openinverter_full_ui(lv_obj_t *parent, OiBackClusterCb back_cb, OiSleepCb sleep_cb);
+lv_obj_t* create_openinverter_full_ui(lv_obj_t *parent, OiSleepCb sleep_cb, OiBrightnessCb bright_cb);
 void update_openinverter_telemetry(const InverterTelemetry &telem);
 void switch_oi_tab_view(int tab_idx);
 
